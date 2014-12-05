@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <mpi.h>
 
 #define COLS (5)
 #define ROWS (8)
@@ -21,64 +22,86 @@ extern void print_buffer(double *,int cols,int rows);
 int main(int argc, char **argv) {
 
 	//initialize MPI and stuff
-	MPI_Init( &argc, &argv );
-
-   	int        rank,  size, i, j, itcnt;
-   	int        i_first, i_last;
+	
+   	int        rank,  size, j;
+	MPI_Init(&argc, &argv);
 
   	MPI_Comm_rank( MPI_COMM_WORLD, &rank );
    	MPI_Comm_size( MPI_COMM_WORLD, &size );
-	double subRows = (double)ROWS/(double)size;
+	int subRows = ROWS/size;
 
     
    	MPI_Status status;
 	//initialize grids
-	double  *p,*p_new;
-	init_grid(&p,&p_new,COLS,ROWS+2);
-	init_boundaries(p,COLS,ROWS+2); 
-	memmove(p_new,p, COLS*(ROWS+2) * sizeof(double) );
-
-	//wait
+	double  *p,*p_new, *local, *local_new;
+	init_grid(&local,&local_new,COLS,subRows+2);
+	if (0 == rank) {
+		init_grid(&p,&p_new,COLS,ROWS+2);
+		init_boundaries(p,COLS,ROWS+2);
+		memmove(p_new,p, COLS*(ROWS+2) * sizeof(double) );
+		print_buffer(p_new,COLS,ROWS+2);
+	}
+	//wait for errbody
 	MPI_Barrier(MPI_COMM_WORLD);
 
 	//distribute local grid to workers
-	for (j=1; j<size; j++){
-		if (rank ==0){
-			MPI_Send(p+j*subRows*COLS,(subRows+2)*COLS, MPI_DOUBLE, j, 0, MPI_COMM_WOLRD);
+	if (rank ==0){	
+		for (j=1; j<size; j++){
+			MPI_Send(p+j*subRows*COLS,(subRows+2)*COLS, MPI_DOUBLE, j, 0, MPI_COMM_WORLD);
 		}
-		MPI_Recv(local, (subRows+2)*COLS, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, status);
 	}
+	MPI_Recv(local, (subRows+2)*COLS, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	
 
-	//now do some stuff with it
+	//now do the solving stuff
 	double *first_buf, *last_buf;
+	int count  = 1000;
 	init_grid(&first_buf, &last_buf, COLS, 1);
-	memmove(local_new, local, (subRows+2)*COLS* sizeof(double) );
 	while(count-- > 0){
 		relax(local_new, local, COLS, subRows+2);
 		//make come copies
 		memmove(last_buf, local_new, COLS*sizeof(double) );
 		memmove(first_buf, local_new+(subRows+1)*COLS, COLS*sizeof (double) );
-		int up_number = (rank ==1)? MPI_PROC_NULL: rank+1;
+		int up_number = (rank == size-1)? MPI_PROC_NULL: rank+1;
 		int down_number = (rank==0)? MPI_PROC_NULL : rank-1; 
-		double recvbuf;
-		//send single row from down to up and from up to down; This is sending the missing row from each, I think
+		//send single row from down to up and from up to down unless you are the top or bottom row; This is sending the missing row from each
 		//MPI_SendRecv(thing to send, size, type, dest, tag, thing received, size, type, source, tag, comm, status)
-		MPI_SendRecv(local_new*(1)*COLS, COLS, MPI_DOUBLE, up_number,0,  recvbuf, COLS, MPI_DOUBLE, down_number, MPI_ANY_TAG, MPI_COMM_WORLD, status);
-		MPI_SendRecv(local_new+subROws*COLS, COLS, MPI_DOUBLE, down_number,0,  recvbuf, COLS, MPI_DOUBLE, up_number, MPI_ANY_TAG, MPI_COMM_WORLD, status);
+		MPI_Sendrecv(local_new+(1)*COLS, COLS, MPI_DOUBLE, down_number,0,  first_buf, COLS, MPI_DOUBLE, up_number, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+		MPI_Sendrecv(local_new+(subRows)*COLS, COLS, MPI_DOUBLE, up_number,0,  last_buf, COLS, MPI_DOUBLE, down_number, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 
 		//wait for everybody to join the party
 		MPI_Barrier(MPI_COMM_WORLD);
 
-		//make some more copies
-		//of what, I'm not sure
-		memmove();
-
+		memmove(local_new ,last_buf,COLS*sizeof(double));
+		memmove(local_new + (subRows+1)*COLS,first_buf,COLS*sizeof(double));
+		
+		// copy updated into current grid
+		memmove(local,local_new,COLS*(subRows+2)*sizeof(double));
 	}
-	//send in the probe
-	MPI_PROBE();
 
-	//and receive something... probably the zero thread receiving
-	MPI_Recv();
+
+	//Send local grids back to thread 0
+	MPI_Send(local_new+1*COLS,(subRows)*COLS,MPI_DOUBLE,0,(subRows+2),MPI_COMM_WORLD);
+	//have thread 0 receive locals
+	if ( 0 == rank ){
+		for ( int i = 0; i < size; i++) {
+			MPI_Probe(MPI_ANY_SOURCE,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
+			MPI_Recv(p_new+(status.MPI_SOURCE*subRows+1)*COLS,(subRows)*COLS,MPI_DOUBLE,status.MPI_SOURCE,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
+		}
+        }
+
+	// have thread 0 print resulting matrix
+	if ( 0 == rank ){
+		print_buffer(p_new,COLS,ROWS+2);
+		if ( 0 == rank ) {
+			free(p_new);
+			free(p);
+		}
+	}
+	free(local);
+	free(local_new);
+	MPI_Finalize();
+
 
 
 
@@ -93,16 +116,11 @@ int main(int argc, char **argv) {
 			printf("Change/Iteration %f/%d\n",get_change(p_new,p,COLS*(ROWS+2)),count); //change at each iteration
 		memmove(p,p_new, COLS*(ROWS+2) * sizeof(double) );
 	}*/
+	return 0;
 
 
 
 
-
-	// Print out the results.
-		print_buffer(p,COLS,ROWS+2);
-	free(p_new); 
-	free(p); 
-	return 0; 
 }
 
 void relax(double *new,double *old, int cols, int rows){
