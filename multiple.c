@@ -21,12 +21,7 @@ extern void print_buffer(double *,int cols,int rows);
 
 int main(int argc, char **argv) {
 	
-	//try running with 2 processors/ see if the first send receive works before testsing out the relaxation method
-
-	// in class something something try sending a simple things first row of top to last of bottom, first row of bot to last row of top
-	
-	//initialize MPI and stuff
-	
+	//initialize MPI stuff
    	int  rank,  size, j;
 	MPI_Init(&argc, &argv);
 
@@ -57,6 +52,10 @@ int main(int argc, char **argv) {
 	}
 	
 	MPI_Recv(local, (subRows+2)*COLS, MPI_DOUBLE, 0, MPI_ANY_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+
+	//initialize local_new so first row has same B.C. as local
+	memmove(local_new,local,COLS*(subRows+2)*sizeof(double));
+
         
         //wait 
 	MPI_Barrier(MPI_COMM_WORLD);
@@ -64,33 +63,34 @@ int main(int argc, char **argv) {
 
 	//now do the solving stuff
 	double *first_buf, *last_buf;
-	int count  = 3;
+	int count  = 300;
 	init_grid(&first_buf, &last_buf, COLS, 1);
 	while(count-- > 0){
+
 		relax(local_new, local, COLS, subRows+2);
+	
 		//make temporary copy of the first and last row of each local grid
 		memmove(last_buf, local_new, COLS*sizeof(double) );
 		memmove(first_buf, local_new+(subRows+1)*COLS, COLS*sizeof (double) );
+		//define up and down numbers for each rank (top rank has no up, bottom rank has no down)
 		int up_number = (rank == size-1)? MPI_PROC_NULL: rank+1;
 		int down_number = (rank==0)? MPI_PROC_NULL : rank-1; 
-		//send single row from down to up and from up to down unless you are the top or bottom row; This is sending the missing row from each
+		
+		//Send missing rows: first send second row (first row not incl. B.C. from down to up)
 		//MPI_SendRecv(thing to send, size, type, dest, tag, thing received, size, type, source, tag, comm, status)
-
-		//send local_new, but skip the first row (adding a col -> second row); so passes second row to first buf of next processor
-		//firstbuf is the recvbuf of the previous processor(down_num)
-		//so you're sending the ~first row, meaning the first row, not including the boundary row
 		MPI_Sendrecv(local_new+(1)*COLS, COLS, MPI_DOUBLE, down_number,0,  first_buf, COLS, MPI_DOUBLE, up_number, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 		//next send bottom row of the +1 processor to the last_buf of the -1 processor
 		MPI_Sendrecv(local_new+(subRows)*COLS, COLS, MPI_DOUBLE, up_number,0,  last_buf, COLS, MPI_DOUBLE, down_number, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 
-		//wait for everybody to join
+		//wait 
 		MPI_Barrier(MPI_COMM_WORLD);
 
 		memmove(local_new ,last_buf,COLS*sizeof(double));
 		memmove(local_new + (subRows+1)*COLS,first_buf,COLS*sizeof(double));
 		
-		// copy updated into current grid
+		// copy local_new(updated) into local to be re-run through relax for next iteration
 		memmove(local,local_new,COLS*(subRows+2)*sizeof(double));
+	
 	}
 
 
@@ -104,7 +104,7 @@ int main(int argc, char **argv) {
 			MPI_Recv(p_new+(status.MPI_SOURCE*subRows+1)*COLS,(subRows)*COLS,MPI_DOUBLE,status.MPI_SOURCE,MPI_ANY_TAG,MPI_COMM_WORLD,&status);
 		}
         }
-        //wait for everybody
+        //wait 
         MPI_Barrier(MPI_COMM_WORLD);
 
 	// have thread 0 print resulting matrix
@@ -146,9 +146,9 @@ void relax(double *new,double *old, int cols, int rows){
 		for ( int i = 1 ; i < cols-1; i++) {
                         //assuming only charge at borders of mesh; assuming points along the border will be held const
 			new[i+j*cols] = 0.25*(old[i-1+j*cols]+old[i+1+j*cols]+old[i+(j-1)*cols]+old[i+(j+1)*cols]);//relaxtion func
-//			printf("  %d   \n",i+(j-1)*COLS);
-//			printf("%d  %d  %d\n",i-1+j*COLS,j+i*COLS,j+1+i*COLS);
-//			printf("  %d   \n",i+(j+1)*COLS);
+		//	printf(" %d,  %d   \n",i+j*cols, i+(j-1)*COLS);
+		//	printf("%d  %d  %d\n",i-1+j*COLS,j+i*COLS,j+1+i*COLS);
+		//	printf("  %d   \n",i+(j+1)*COLS);
 		}
 //		puts(" ");
 //		puts(" ");
